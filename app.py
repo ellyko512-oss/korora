@@ -3,7 +3,9 @@
 Reqly — 사내 업무요청 서비스 PoC
 - 문제 정의: 요청이 '관리 가능한 객체(티켓)'로 전환되는 순간이 없다는 것
 - 해결: 티켓화 + 상태 머신 + 활동 이력 자동 축적 + AI 접수 에이전트
-- 의도적 제외: 로그인(역할 토글로 대체), 알림, 파일 첨부, 검색, 통계 고도화
+- 역할 모델: 역할은 계정 속성이 아니라 '티켓과의 관계' — 누구나 요청자이면서,
+  자기 팀으로 들어온 티켓 앞에서는 처리자가 된다. (사용자 선택 + 모드 전환으로 표현)
+- 의도적 제외: 로그인(사용자 선택으로 대체), 알림, 파일 첨부, 검색, 통계 고도화
 """
 
 import json
@@ -13,7 +15,7 @@ from datetime import datetime, timedelta
 import streamlit as st
 
 # ──────────────────────────────────────────────
-# 0. 상수 정의 (상태 머신 / 분류 체계)
+# 0. 상수 정의 (상태 머신 / 분류 체계 / 조직)
 # ──────────────────────────────────────────────
 
 STATUS_LABELS = {
@@ -36,7 +38,23 @@ TRANSITIONS = {
 CATEGORIES = ["IT", "비품", "시설"]
 PRIORITIES = ["높음", "보통", "낮음"]
 TEAMS = {"IT": "IT지원팀", "비품": "총무팀", "시설": "시설관리팀"}
-HANDLERS = ["김지원", "박민수", "이서연"]
+
+# 담당팀별 처리 가능 인원 — 담당자 후보는 티켓의 담당팀 기준으로 결정
+TEAM_MEMBERS = {
+    "IT지원팀": ["김지원", "한도윤"],
+    "총무팀": ["박민수", "오세라"],
+    "시설관리팀": ["이서연", "강태오"],
+}
+
+# 전 직원 — 모든 부서의 누구나 요청자가 될 수 있고,
+# 처리팀 소속이라도 다른 팀 소관 업무에서는 요청자다 (역할 = 티켓과의 관계)
+EMPLOYEES = {
+    "정하늘": "마케팅팀", "최수진": "영업팀", "이준호": "재무팀",
+    "김다은": "인사팀", "박서준": "디자인팀", "홍길동": "전략기획팀",
+    "김지원": "IT지원팀", "한도윤": "IT지원팀",
+    "박민수": "총무팀", "오세라": "총무팀",
+    "이서연": "시설관리팀", "강태오": "시설관리팀",
+}
 
 DB_PATH = "reqly.db"
 
@@ -84,7 +102,7 @@ def init_db():
     )
     conn.commit()
 
-    # 시드 데이터: 비어있을 때만 8건 생성 (심사자가 접속 즉시 체험 가능)
+    # 시드 데이터: 비어있을 때만 생성 (심사자가 접속 즉시 체험 가능)
     if conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0:
         seed(conn)
     conn.close()
@@ -97,11 +115,13 @@ def seed(conn):
         ("3층 회의실 모니터 전원 불량", "3층 대회의실 모니터가 켜지지 않습니다. 오후 2시 고객 미팅 전에 확인 부탁드립니다.", "IT", "높음", "IN_PROGRESS", "최수진", "김지원", 1),
         ("탕비실 커피 원두 재고 소진", "4층 탕비실 원두가 다 떨어졌습니다. 디카페인도 함께 요청드려요.", "비품", "낮음", "NEW", "정하늘", None, 0),
         ("주차장 출입카드 인식 오류", "지하 1층 주차장에서 사원증 인식이 간헐적으로 실패합니다.", "시설", "보통", "DONE", "이준호", "이서연", 5),
-        ("VPN 접속 불가", "재택근무 중 VPN 연결이 계속 끊깁니다. 오류 코드 691.", "IT", "높음", "ASSIGNED", "김다은", "김지원", 0),
+        ("VPN 접속 불가", "재택근무 중 VPN 연결이 계속 끊깁니다. 오류 코드 691.", "IT", "높음", "ASSIGNED", "김다은", "한도윤", 0),
         ("사무용 의자 바퀴 파손", "6층 자리 의자 바퀴가 빠졌습니다. 교체 부탁드립니다.", "비품", "보통", "ASSIGNED", "박서준", "박민수", 2),
-        ("화장실 세면대 누수", "5층 남자화장실 세면대 아래에서 물이 샙니다.", "시설", "높음", "IN_PROGRESS", "홍길동", "이서연", 1),
-        ("공용 프린터 토너 교체", "2층 복합기 토너 부족 경고가 떴습니다.", "비품", "낮음", "DONE", "최수진", "박민수", 7),
+        ("화장실 세면대 누수", "5층 남자화장실 세면대 아래에서 물이 샙니다.", "시설", "높음", "IN_PROGRESS", "홍길동", "강태오", 1),
+        ("공용 프린터 토너 교체", "2층 복합기 토너 부족 경고가 떴습니다.", "비품", "낮음", "DONE", "최수진", "오세라", 7),
         ("노트북 지급 요청", "신규 입사자용 노트북 1대가 필요합니다. 입사일은 다음 주 월요일입니다.", "IT", "보통", "REJECTED", "정하늘", "김지원", 3),
+        # 역할 = 티켓과의 관계를 보여주는 시드: IT지원팀 김지원도 비품 앞에서는 '요청자'
+        ("모니터 받침대 요청", "듀얼 모니터 설치용 받침대 1개가 필요합니다.", "비품", "낮음", "NEW", "김지원", None, 0),
     ]
     for title, body, cat, pri, status, requester, handler, days in rows:
         created = (now - timedelta(days=days)).strftime("%Y-%m-%d %H:%M")
@@ -241,7 +261,13 @@ def render_badge_row(r):
     )
 
 
-def page_create(role_name):
+def go_detail(rid):
+    """목록 → 상세 이동. 위젯 key를 직접 갱신해 한 번의 클릭으로 전환."""
+    st.session_state["selected_id"] = rid
+    st.session_state["menu"] = "상세"
+
+
+def page_create(user):
     st.subheader("📝 업무 요청하기")
     st.caption("무슨 일이 있는지 자유롭게 적어주세요. AI가 제목·분류·우선순위를 제안하고, 최종 결정은 직접 하시면 됩니다.")
 
@@ -254,10 +280,7 @@ def page_create(role_name):
         # 재실행 대비: 제안 결과를 session_state에 보존
         st.session_state["ai_suggestion"] = suggestion
         st.session_state["ai_input_text"] = text
-        if suggestion is None:
-            st.session_state["ai_failed"] = True
-        else:
-            st.session_state["ai_failed"] = False
+        st.session_state["ai_failed"] = suggestion is None
 
     suggestion = st.session_state.get("ai_suggestion")
     ai_failed = st.session_state.get("ai_failed", False)
@@ -283,19 +306,23 @@ def page_create(role_name):
                     st.error("제목을 입력해주세요.")
                 else:
                     body = st.session_state.get("ai_input_text", text)
-                    rid = create_request(title, body, category, priority, role_name, suggestion)
+                    rid = create_request(title, body, category, priority, user, suggestion)
                     st.session_state.pop("ai_suggestion", None)
                     st.session_state.pop("ai_failed", None)
-                    st.success(f"요청 #{rid} 이(가) 접수되었습니다. '요청 목록'에서 진행 상황을 확인하세요.")
+                    st.success(f"요청 #{rid} 이(가) 접수되었습니다. '목록'에서 진행 상황을 확인하세요.")
 
 
-def page_list(role, role_name):
-    st.subheader("📋 요청 목록" if role == "처리자" else "📋 내 요청")
+def page_list(mode, user):
+    if mode == "처리자 모드":
+        st.subheader("📋 요청 목록")
+        st.caption(f"{EMPLOYEES[user]} 소관 티켓을 처리할 수 있어요. 다른 팀 티켓은 조회만 가능합니다.")
+    else:
+        st.subheader("📋 내 요청")
     conn = get_conn()
-    if role == "처리자":
+    if mode == "처리자 모드":
         rows = conn.execute("SELECT * FROM requests ORDER BY id DESC").fetchall()
     else:
-        rows = conn.execute("SELECT * FROM requests WHERE requester=? ORDER BY id DESC", (role_name,)).fetchall()
+        rows = conn.execute("SELECT * FROM requests WHERE requester=? ORDER BY id DESC", (user,)).fetchall()
     conn.close()
 
     tabs = st.tabs(["전체"] + [STATUS_LABELS[s] for s in STATUS_LABELS])
@@ -311,13 +338,12 @@ def page_list(role, role_name):
                     c1, c2 = st.columns([5, 1])
                     c1.markdown(f"**#{r['id']} {r['title']}**")
                     c1.caption(render_badge_row(r))
-                    if c2.button("상세", key=f"detail_{status}_{r['id']}"):
-                        st.session_state["selected_id"] = r["id"]
-                        st.session_state["page"] = "상세"
-                        st.rerun()
+                    # on_click 콜백: 재실행 전에 상태가 갱신되어 한 번의 클릭으로 이동
+                    c2.button("상세", key=f"detail_{status}_{r['id']}",
+                              on_click=go_detail, args=(r["id"],))
 
 
-def page_detail(role, role_name):
+def page_detail(mode, user):
     rid = st.session_state.get("selected_id")
     if not rid:
         st.info("요청 목록에서 항목을 선택해주세요.")
@@ -327,25 +353,29 @@ def page_detail(role, role_name):
     acts = conn.execute("SELECT * FROM activities WHERE request_id=? ORDER BY id", (rid,)).fetchall()
     conn.close()
 
-    if st.button("← 목록으로"):
-        st.session_state["page"] = "목록"
-        st.rerun()
+    st.button("← 목록으로", on_click=lambda: st.session_state.update(menu="목록"))
 
     st.subheader(f"#{r['id']} {r['title']}")
     st.caption(render_badge_row(r))
     st.markdown(f"> {r['body']}")
-    st.markdown(f"**요청자:** {r['requester']} · **담당팀:** {r['team']}")
+    st.markdown(f"**요청자:** {r['requester']} ({EMPLOYEES.get(r['requester'], '외부')}) · **담당팀:** {r['team']}")
 
-    # 처리자 전용: 담당자 지정 + 상태 변경 (허용된 전이만 노출)
-    if role == "처리자":
+    # 처리 권한: 처리자 모드 + 현재 사용자가 해당 티켓 담당팀 소속일 때
+    can_handle = mode == "처리자 모드" and EMPLOYEES.get(user) == r["team"]
+    if mode == "처리자 모드" and not can_handle:
+        st.info(f"이 티켓의 담당팀은 {r['team']}입니다. {EMPLOYEES[user]} 소속인 {user} 님은 조회와 코멘트만 가능해요.")
+
+    if can_handle:
         st.divider()
         c1, c2 = st.columns(2)
         with c1:
-            handler = st.selectbox("담당자 지정", ["선택"] + HANDLERS,
-                                   index=(HANDLERS.index(r["handler"]) + 1) if r["handler"] in HANDLERS else 0)
+            # 담당자 후보 = 티켓 담당팀 소속 인원 (모든 부서에서 해당 팀이 처리 주체)
+            candidates = TEAM_MEMBERS[r["team"]]
+            handler = st.selectbox("담당자 지정", ["선택"] + candidates,
+                                   index=(candidates.index(r["handler"]) + 1) if r["handler"] in candidates else 0)
             if handler != "선택" and handler != r["handler"]:
                 if st.button("담당자 저장"):
-                    assign_handler(rid, handler, role_name)
+                    assign_handler(rid, handler, user)
                     st.rerun()
         with c2:
             allowed = TRANSITIONS[r["status"]]
@@ -360,7 +390,7 @@ def page_detail(role, role_name):
                     elif new_status == "ASSIGNED" and not r["handler"] and handler == "선택":
                         st.error("할당 전에 담당자를 먼저 지정해주세요.")
                     else:
-                        change_status(rid, new_status, role_name, reason)
+                        change_status(rid, new_status, user, reason)
                         st.rerun()
             else:
                 st.caption("종결된 요청입니다. 더 이상 상태를 변경할 수 없습니다.")
@@ -375,7 +405,7 @@ def page_detail(role, role_name):
     with st.form("comment_form", clear_on_submit=True):
         comment = st.text_input("코멘트 남기기")
         if st.form_submit_button("등록") and comment.strip():
-            add_comment(rid, role_name, comment)
+            add_comment(rid, user, comment)
             st.rerun()
 
 
@@ -402,24 +432,29 @@ def main():
     with st.sidebar:
         st.title("📮 Reqly")
         st.caption("모든 요청을, 잃어버리지 않게.")
-        # 로그인 대신 역할 전환 토글 — PoC 검증 대상이 인증이 아니기 때문
-        role = st.radio("역할 전환 (로그인 대체)", ["요청자", "처리자"])
-        role_name = "정하늘" if role == "요청자" else "김지원"
-        st.caption(f"현재 사용자: {role_name}")
+
+        # 로그인 대신 사용자 선택 — 모든 부서의 누구나 요청자가 될 수 있음
+        user = st.selectbox("사용자 (로그인 대체)", list(EMPLOYEES.keys()), key="user",
+                            format_func=lambda n: f"{n} · {EMPLOYEES[n]}")
+
+        # 역할은 계정이 아니라 티켓과의 관계 → '모드'로 표현
+        mode = st.radio("모드", ["요청자 모드", "처리자 모드"], key="mode")
+        st.caption("역할은 계정이 아니라 티켓과의 관계예요. 누구나 요청자이면서, 자기 팀 티켓 앞에서는 처리자가 됩니다.")
         st.divider()
-        pages = ["요청하기", "목록", "상세"] if role == "요청자" else ["목록", "상세", "대시보드"]
-        default_page = st.session_state.get("page", pages[0])
-        if default_page not in pages:
-            default_page = pages[0]
-        page = st.radio("메뉴", pages, index=pages.index(default_page))
-        st.session_state["page"] = page
+
+        pages = ["요청하기", "목록", "상세"] if mode == "요청자 모드" else ["목록", "상세", "대시보드"]
+        # key 기반 라디오: index 재계산으로 인한 '두 번 클릭' 문제 방지.
+        # 모드 전환으로 현재 메뉴가 유효하지 않을 때만 초기화.
+        if st.session_state.get("menu") not in pages:
+            st.session_state["menu"] = pages[0]
+        page = st.radio("메뉴", pages, key="menu")
 
     if page == "요청하기":
-        page_create(role_name)
+        page_create(user)
     elif page == "목록":
-        page_list(role, role_name)
+        page_list(mode, user)
     elif page == "상세":
-        page_detail(role, role_name)
+        page_detail(mode, user)
     elif page == "대시보드":
         page_dashboard()
 

@@ -51,8 +51,6 @@ def update_task_status(task_id, new_status):
 # ==========================================
 # 2. MOCK AI AGENT (FALLBACK LOGIC)
 # ==========================================
-# If API key is not configured, this smart heuristic logic categorizes requests.
-# This ensures the PoC runs perfectly immediately without setup!
 def mock_ai_triage(text):
     text_lower = text.lower()
     
@@ -119,7 +117,6 @@ def real_ai_triage(text, api_key):
         )
         
         result_text = response.choices[0].message.content.strip()
-        # Clean potential markdown formatting
         if result_text.startswith("```json"):
             result_text = result_text.split("```json")[1].split("```")[0].strip()
         elif result_text.startswith("```"):
@@ -172,8 +169,7 @@ with tab1:
     with st.form("request_form", clear_on_submit=True):
         raw_input = st.text_area(
             "요청 사항 입력", 
-            placeholder="예시 1: 제 자리 모니터 전원이 안 켜져요. 교체 부탁드립니다.
-예시 2: 3층 회의실 에어컨 바람이 너무 약해서 더워요. 필터 청소 좀 해주세요.",
+            placeholder="예시 1: 제 자리 모니터 전원이 안 켜져요. 교체 부탁드립니다. \n예시 2: 3층 회의실 에어컨 바람이 너무 약해서 더워요. 필터 청소 좀 해주세요.",
             height=150
         )
         submit_btn = st.form_submit_button("요청 제출하기")
@@ -264,5 +260,3 @@ with tab2:
                         update_task_status(row['id'], new_status)
                         st.success(f"ID #{row['id']} 상태가 '{new_status}'(으)로 변경되었습니다!")
                         st.rerun()
-
-# DB Connection Close (optional because sqlite usually handles it, but good practice)

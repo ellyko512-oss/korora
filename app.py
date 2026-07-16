@@ -1017,8 +1017,8 @@ def main():
 
     with st.sidebar:
         st.title("📮 Korora")
-        st.caption("모든 요청을, 잃어버리지 않게.")
-        # 로그인 대신 역할 전환 토글 — PoC 검증 대상이 인증이 아니기 때문
+        st.caption("모든 요청을, 놓치지 않게!")
+        # 로그인 대신 역할 전환 토글 — PoC로 빠르게 확인해보기 위해
         prev_role = st.session_state.get("_role_last")
         role = st.radio("역할 전환 (로그인 대체)", ["요청자", "처리자", "관리자"], key="role")
         role_changed = prev_role is not None and role != prev_role

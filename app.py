@@ -378,7 +378,8 @@ JSON 형식:
         if data.get("category") not in CATEGORIES or data.get("priority") not in PRIORITIES:
             return None
         return data
-    except Exception:
+except Exception as e:
+        st.error(f"AI 오류: {e}")
         return None
 
 

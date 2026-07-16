@@ -7,6 +7,7 @@ Korora — 사내 업무요청 서비스 PoC
 """
 
 import json
+import re
 import sqlite3
 import uuid
 import calendar
@@ -207,6 +208,17 @@ def display_timestamp(value):
     return f"{value}:00" if value and len(value) == 16 else value
 
 
+def is_stale_new(r):
+    """'누락'은 접수 전뿐 아니라 접수 후(신규 상태로 방치)에도 생긴다 — 24시간 기준."""
+    if r["status"] != "NEW":
+        return False
+    try:
+        created = datetime.strptime(display_timestamp(r["created_at"]), "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return False
+    return (datetime.now() - created) > timedelta(hours=24)
+
+
 def display_activity_content(activity):
     """기존 이력의 담당자 지정 문구에도 소속을 보완한다."""
     content = activity["content"]
@@ -271,6 +283,69 @@ def save_broadcast_email(email):
     )
     conn.commit()
     conn.close()
+
+
+def _tokenize(text):
+    """단순 키워드 매칭용 토큰화. 형태소 분석 없이도 중복 감지에는 충분하다."""
+    return {w for w in re.findall(r"[가-힣A-Za-z0-9]+", text or "") if len(w) >= 2}
+
+
+def find_similar_open_tickets(text, category=None, limit=3):
+    """티켓화만으로는 못 잡는 '중복' 문제 — 접수 시점에 진행중인 유사 요청을 찾는다.
+    종결(DONE/REJECTED)된 티켓은 이미 끝난 일이므로 후보에서 제외한다."""
+    query_tokens = _tokenize(text)
+    if not query_tokens:
+        return []
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM requests WHERE status IN ('NEW','ASSIGNED','IN_PROGRESS') ORDER BY id DESC"
+    ).fetchall()
+    conn.close()
+    scored = []
+    for r in rows:
+        candidate_tokens = _tokenize(f"{r['title']} {r['body']}")
+        overlap = query_tokens & candidate_tokens
+        if not overlap:
+            continue
+        score = len(overlap) / len(query_tokens | candidate_tokens)
+        if category and r["category"] == category:
+            score += 0.15
+        scored.append((score, r))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [r for score, r in scored[:limit] if score >= 0.15]
+
+
+def compute_ai_edit_stats():
+    """AI를 기능이 아니라 검증 대상으로 다룬다 — 제안이 그대로 채택된 비율과
+    필드별 수정률을 ai_suggested(원본 제안) vs 최종 확정값 비교로 집계한다."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT title, category, priority, ai_suggested FROM requests WHERE ai_suggested IS NOT NULL"
+    ).fetchall()
+    conn.close()
+    total = 0
+    unchanged = 0
+    field_changed = {"title": 0, "category": 0, "priority": 0}
+    for r in rows:
+        try:
+            suggestion = json.loads(r["ai_suggested"])
+        except (TypeError, ValueError):
+            continue
+        total += 1
+        changed = False
+        for field in field_changed:
+            if suggestion.get(field) != r[field]:
+                field_changed[field] += 1
+                changed = True
+        if not changed:
+            unchanged += 1
+    if total == 0:
+        return None
+    return {
+        "total": total,
+        "unchanged_rate": unchanged / total * 100,
+        "field_change_rate": {k: v / total * 100 for k, v in field_changed.items()},
+    }
 
 
 def create_request(title, body, category, priority, requester, ai_suggested=None):
@@ -521,9 +596,10 @@ def broadcast_activity(subject: str, body: str) -> None:
 # ──────────────────────────────────────────────
 
 def render_badge_row(r):
+    stale = " · ⏰ 방치됨 (24시간 초과)" if is_stale_new(r) else ""
     return (
         f"{STATUS_LABELS[r['status']]} · {r['category']} · 우선순위 {r['priority']}"
-        f" · 담당 {display_person(r['handler'])} · {display_timestamp(r['created_at'])}"
+        f" · 담당 {display_person(r['handler'])} · {display_timestamp(r['created_at'])}{stale}"
     )
 
 
@@ -536,13 +612,16 @@ def render_clickable_request_card(r, role, role_name):
     href = html.escape(
         f"?{urlencode({'request_id': r['id'], 'role': role, 'user': role_name})}", quote=True
     )
+    status_label = esc(STATUS_LABELS[r["status"]])
+    if is_stale_new(r):
+        status_label += " · ⏰ 방치됨"
     st.markdown(
         f"""
         <a href="{href}" target="_self" style="color:inherit; text-decoration:none; display:block;">
           <div style="border:1px solid rgba(151, 151, 180, .45); border-radius:.75rem; padding:1.15rem 1.3rem; margin:.45rem 0 .8rem; cursor:pointer;">
             <div style="display:flex; justify-content:space-between; gap:1rem; align-items:start;">
               <strong style="font-size:1.05rem;">#{r['id']} {esc(r['title'])}</strong>
-              <span style="white-space:nowrap; font-weight:600;">{esc(STATUS_LABELS[r['status']])}</span>
+              <span style="white-space:nowrap; font-weight:600;">{status_label}</span>
             </div>
             <div style="margin:1.2rem 0; color:rgba(49, 51, 63, .78);">{body}</div>
             <div style="display:flex; flex-wrap:wrap; gap:.65rem 1.6rem; color:rgba(49, 51, 63, .78); font-size:.86rem;">
@@ -579,12 +658,27 @@ def page_create(role_name):
                 st.session_state["ai_failed"] = True
             else:
                 st.session_state["ai_failed"] = False
+            # 티켓화만으로는 못 잡는 '중복' — 접수 시점에 진행중인 유사 요청을 함께 조회
+            st.session_state["dup_matches"] = find_similar_open_tickets(
+                text, category=(suggestion or {}).get("category")
+            )
 
     suggestion = st.session_state.get("ai_suggestion")
     ai_failed = st.session_state.get("ai_failed", False)
+    dup_matches = st.session_state.get("dup_matches") or []
 
     if ai_failed:
         st.warning("AI 분석을 사용할 수 없어 수동 입력으로 진행합니다. (API 키 미설정 또는 호출 실패)")
+
+    if dup_matches:
+        st.warning("⚠️ 비슷한 요청이 이미 진행 중이에요. 확인 후 그대로 진행할지 결정해주세요.")
+        for m in dup_matches:
+            dc1, dc2 = st.columns([5, 1])
+            dc1.markdown(f"**#{m['id']} {m['title']}** — {STATUS_LABELS[m['status']]}")
+            if dc2.button("보기", key=f"dup_view_{m['id']}"):
+                st.session_state["selected_id"] = m["id"]
+                st.session_state["nav_target"] = "상세"
+                st.rerun()
 
     # AI 제안이 있든 없든 동일한 확정 폼 사용 — AI는 기본값을 채워줄 뿐
     if suggestion or ai_failed:
@@ -610,6 +704,7 @@ def page_create(role_name):
                         upload_attachment(rid, f, role_name)
                     st.session_state.pop("ai_suggestion", None)
                     st.session_state.pop("ai_failed", None)
+                    st.session_state.pop("dup_matches", None)
                     st.success(f"요청 #{rid} 이(가) 접수되었습니다. '요청 목록'에서 진행 상황을 확인하세요.")
 
 
@@ -789,6 +884,20 @@ def page_dashboard():
         return
 
     st.divider()
+    st.markdown("**AI 제안 검증 현황**")
+    st.caption("AI는 기능으로 넣은 게 아니라 검증 대상으로 다룹니다 — 제안이 그대로 채택된 비율과 필드별 수정률을 추적합니다.")
+    ai_stats = compute_ai_edit_stats()
+    if not ai_stats:
+        st.caption("AI 제안을 거쳐 접수된 요청이 아직 없습니다.")
+    else:
+        ai_c1, ai_c2, ai_c3, ai_c4 = st.columns(4)
+        ai_c1.metric("AI 제안 활용", f"{ai_stats['total']}건")
+        ai_c2.metric("그대로 확정된 비율", f"{ai_stats['unchanged_rate']:.1f}%")
+        ai_c3.metric("제목 수정률", f"{ai_stats['field_change_rate']['title']:.1f}%")
+        avg_class_rate = (ai_stats['field_change_rate']['category'] + ai_stats['field_change_rate']['priority']) / 2
+        ai_c4.metric("분류·우선순위 수정률", f"{avg_class_rate:.1f}%")
+
+    st.divider()
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**카테고리별 상태 분포**")
@@ -867,6 +976,15 @@ def page_dashboard():
         st.markdown("**반려율**")
         rejected = (df["status"] == "REJECTED").sum()
         st.metric("전체 대비 반려", f"{rejected / len(df) * 100:.1f}%", help=f"{rejected}건 / 전체 {len(df)}건")
+
+    st.divider()
+    with st.expander("📌 로드맵: 반복 요청은 운영 시그널이다"):
+        st.caption(
+            "기록의 진짜 가치는 감사가 아니라 재사용입니다. 같은 유형의 요청이 "
+            "반복적으로 접수된다면 그건 개별 처리 대상이 아니라 설비 교체·프로세스 "
+            "개선이 필요하다는 신호입니다. 예: 같은 프린터 고장이 5회 이상 접수되면 "
+            "'설비 점검 필요' 알림을 자동으로 띄우는 식으로 확장할 수 있습니다."
+        )
 
 
 # ──────────────────────────────────────────────

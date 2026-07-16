@@ -566,7 +566,7 @@ def page_create(role_name):
     text = st.text_area("요청 내용", placeholder="예) 3층 회의실 모니터가 안 켜져요. 오후 2시에 고객 미팅이 있어서 급합니다.", height=120)
 
     col1, col2 = st.columns([1, 3])
-    if col1.button("🤖 요청", type="primary"):
+    if col1.button("🤖 AI 요청", type="primary"):
         if not text.strip():
             st.warning("요청 내용을 입력해주세요.")
         else:

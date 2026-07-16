@@ -126,6 +126,17 @@ def init_db():
             uploaded_by TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS notification_emails (
+            user_name TEXT PRIMARY KEY,
+            email TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
         """
     )
     conn.commit()
@@ -211,6 +222,57 @@ def add_activity(conn, request_id, actor, type_, content):
     )
 
 
+def get_notification_email(user_name):
+    """사용자가 직접 저장한 수신 주소를 우선하고, 없으면 데모 기본 주소를 사용한다."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT email FROM notification_emails WHERE user_name=?", (user_name,)
+    ).fetchone()
+    conn.close()
+    return row["email"] if row else EMAILS.get(user_name, "")
+
+
+def save_notification_email(user_name, email):
+    conn = get_conn()
+    conn.execute(
+        """
+        INSERT INTO notification_emails (user_name, email, updated_at) VALUES (?,?,?)
+        ON CONFLICT(user_name) DO UPDATE SET email=excluded.email, updated_at=excluded.updated_at
+        """,
+        (user_name, email, now_str()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def notify_ticket_event(recipients, subject, body, exclude_name=None):
+    """중복 수신을 제거해 요청자·처리자에게 티켓 이벤트를 알린다."""
+    for recipient in {name for name in recipients if name and name != "시스템"}:
+        if recipient != exclude_name:
+            send_email(recipient, subject, body)
+
+
+def get_broadcast_email():
+    """이 환경에서 벌어지는 모든 활동을 받아볼 전체 구독 이메일. 사용자 개인별이 아닌 전역 설정이다."""
+    conn = get_conn()
+    row = conn.execute("SELECT value FROM app_settings WHERE key='broadcast_email'").fetchone()
+    conn.close()
+    return row["value"] if row else ""
+
+
+def save_broadcast_email(email):
+    conn = get_conn()
+    conn.execute(
+        """
+        INSERT INTO app_settings (key, value) VALUES ('broadcast_email', ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """,
+        (email,),
+    )
+    conn.commit()
+    conn.close()
+
+
 def create_request(title, body, category, priority, requester, ai_suggested=None):
     conn = get_conn()
     cur = conn.execute(
@@ -224,12 +286,16 @@ def create_request(title, body, category, priority, requester, ai_suggested=None
     add_activity(conn, rid, requester, "CREATED", "요청 생성")
     conn.commit()
     conn.close()
+    subject = f"[Korora] 요청 #{rid}이 접수되었습니다"
+    body = f"'{title}' 요청이 접수되었습니다. 담당팀: {TEAMS[category]}\n현재 상태: {STATUS_LABELS['NEW']}"
+    send_email(requester, subject, body)
+    broadcast_activity(subject, f"{display_person(requester)}님이 새 요청을 접수했습니다.\n{body}")
     return rid
 
 
 def change_status(request_id, new_status, actor, reason="", force=False):
     conn = get_conn()
-    row = conn.execute("SELECT status, title, requester FROM requests WHERE id=?", (request_id,)).fetchone()
+    row = conn.execute("SELECT status, title, requester, handler FROM requests WHERE id=?", (request_id,)).fetchone()
     current = row["status"]
     # 관리자는 감사 이력을 남기면서 상태 머신 제한을 우회할 수 있다.
     if not force and new_status not in TRANSITIONS[current]:
@@ -243,24 +309,24 @@ def change_status(request_id, new_status, actor, reason="", force=False):
     add_activity(conn, request_id, actor, "STATUS", content)
     conn.commit()
     conn.close()
-    send_email(
-        row["requester"], f"[Korora] 요청 #{request_id} 상태가 변경되었습니다",
-        f"'{row['title']}' 요청이 {STATUS_LABELS[new_status]} 상태로 변경되었습니다.\n{content}",
-    )
+    subject = f"[Korora] 요청 #{request_id} 상태가 변경되었습니다"
+    body = f"'{row['title']}' 요청이 {STATUS_LABELS[new_status]} 상태로 변경되었습니다.\n{content}"
+    notify_ticket_event([row["requester"], row["handler"]], subject, body, exclude_name=actor)
+    broadcast_activity(subject, f"{display_person(actor)}님이 변경했습니다.\n{body}")
     return True
 
 
 def assign_handler(request_id, handler, actor):
     conn = get_conn()
-    title = conn.execute("SELECT title FROM requests WHERE id=?", (request_id,)).fetchone()["title"]
+    row = conn.execute("SELECT title, requester FROM requests WHERE id=?", (request_id,)).fetchone()
     conn.execute("UPDATE requests SET handler=?, updated_at=? WHERE id=?", (handler, now_str(), request_id))
     add_activity(conn, request_id, actor, "ASSIGN", f"담당자 지정: {handler}")
     conn.commit()
     conn.close()
-    send_email(
-        handler, f"[Korora] 새 업무 요청이 배정되었습니다 (#{request_id})",
-        f"'{title}' (#{request_id}) 요청의 담당자로 지정되었습니다.",
-    )
+    subject = f"[Korora] 요청 #{request_id} 담당자가 지정되었습니다"
+    body = f"'{row['title']}' 요청의 담당자가 {display_person(handler)}(으)로 지정되었습니다."
+    notify_ticket_event([handler, row["requester"]], subject, body)
+    broadcast_activity(subject, f"{display_person(actor)}님이 지정했습니다.\n{body}")
 
 
 def add_comment(request_id, actor, text):
@@ -271,12 +337,12 @@ def add_comment(request_id, actor, text):
     conn.commit()
     conn.close()
     # 요청자가 남기면 담당자에게, 담당자(혹은 그 외)가 남기면 요청자에게 알림
+    subject = f"[Korora] 요청 #{request_id}에 새 코멘트가 등록되었습니다"
+    body = f"'{row['title']}' 요청에 {display_person(actor)}님이 코멘트를 남겼습니다:\n{text}"
     notify_target = row["handler"] if actor == row["requester"] else row["requester"]
     if notify_target:
-        send_email(
-            notify_target, f"[Korora] 요청 #{request_id}에 새 코멘트가 등록되었습니다",
-            f"'{row['title']}' 요청에 {actor}님이 코멘트를 남겼습니다:\n{text}",
-        )
+        send_email(notify_target, subject, body)
+    broadcast_activity(subject, body)
 
 
 # ──────────────────────────────────────────────
@@ -374,6 +440,9 @@ def upload_attachment(request_id, uploaded_file, actor) -> bool:
         st.warning(f"'{uploaded_file.name}' 업로드 중 오류가 발생했습니다.")
         return False
     conn = get_conn()
+    request_row = conn.execute(
+        "SELECT title, requester, handler FROM requests WHERE id=?", (request_id,)
+    ).fetchone()
     conn.execute(
         "INSERT INTO attachments (request_id, filename, s3_key, content_type, size_bytes, uploaded_by, created_at)"
         " VALUES (?,?,?,?,?,?,?)",
@@ -382,6 +451,12 @@ def upload_attachment(request_id, uploaded_file, actor) -> bool:
     add_activity(conn, request_id, actor, "ATTACHMENT", f"파일 첨부: {uploaded_file.name}")
     conn.commit()
     conn.close()
+    subject = f"[Korora] 요청 #{request_id}에 첨부 파일이 등록되었습니다"
+    body = f"'{request_row['title']}' 요청에 {display_person(actor)}님이 '{uploaded_file.name}' 파일을 첨부했습니다."
+    notify_target = request_row["handler"] if actor == request_row["requester"] else request_row["requester"]
+    if notify_target:
+        send_email(notify_target, subject, body)
+    broadcast_activity(subject, body)
     return True
 
 
@@ -407,11 +482,10 @@ def get_download_url(s3_key: str):
         return None
 
 
-def send_email(to_name: str, subject: str, body: str) -> bool:
-    """EMAILS 매핑에서 수신자 조회 후 SES로 발송. 실패해도 예외를 올리지 않음."""
+def _send_raw_email(to_email: str, subject: str, body: str) -> bool:
+    """실제 SES 발송. 실패해도 예외를 올리지 않아 업무 흐름을 막지 않는다."""
     client = get_ses_client()
     sender = get_secret("SES_SENDER_EMAIL")
-    to_email = EMAILS.get(to_name)
     if not client or not sender or not to_email:
         return False
     to_email = get_secret("EMAIL_TEST_OVERRIDE") or to_email
@@ -427,6 +501,18 @@ def send_email(to_name: str, subject: str, body: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def send_email(to_name: str, subject: str, body: str) -> bool:
+    """저장된 수신 주소(없으면 기본 매핑)로 SES 발송."""
+    return _send_raw_email(get_notification_email(to_name), subject, body)
+
+
+def broadcast_activity(subject: str, body: str) -> None:
+    """전체 활동 구독 이메일이 설정돼 있으면, 시스템에서 벌어지는 모든 활동을 그 주소로도 보낸다."""
+    target = get_broadcast_email()
+    if target:
+        _send_raw_email(target, subject, body)
 
 
 # ──────────────────────────────────────────────
@@ -529,8 +615,12 @@ def page_create(role_name):
 def page_list(role, role_name):
     st.subheader("📋 내 요청" if role == "요청자" else "📋 요청 목록")
     conn = get_conn()
-    if role in ["처리자", "관리자"]:
+    if role == "관리자":
         rows = conn.execute("SELECT * FROM requests ORDER BY id DESC").fetchall()
+    elif role == "처리자":
+        rows = conn.execute(
+            "SELECT * FROM requests WHERE handler=? OR handler IS NULL ORDER BY id DESC", (role_name,)
+        ).fetchall()
     else:
         rows = conn.execute("SELECT * FROM requests WHERE requester=? ORDER BY id DESC", (role_name,)).fetchall()
     conn.close()
@@ -845,6 +935,38 @@ def main():
         menu_page = st.radio("메뉴", pages, key="page")
         st.session_state["_menu_last"] = menu_page
         page = "상세" if st.session_state.get("show_detail") else menu_page
+
+        st.divider()
+        with st.expander("✉️ 이메일 수신 설정"):
+            st.caption(f"{display_person(role_name)}님이 티켓 알림을 받을 이메일 주소를 설정합니다.")
+            with st.form(f"email_settings_{role_name}"):
+                notification_email = st.text_input(
+                    "받으실 이메일 주소",
+                    value=get_notification_email(role_name),
+                    placeholder="name@example.com",
+                )
+                if st.form_submit_button("이메일 주소 저장"):
+                    notification_email = notification_email.strip()
+                    if "@" not in notification_email or notification_email.startswith("@"):
+                        st.error("유효한 이메일 주소를 입력해주세요.")
+                    else:
+                        save_notification_email(role_name, notification_email)
+                        st.success("이메일 수신 주소를 저장했습니다.")
+            st.caption("요청 등록, 담당자 배정, 상태 변경, 코멘트, 첨부 파일 등록 시 알림을 보냅니다.")
+
+        with st.expander("🔔 전체 활동 알림 구독"):
+            st.caption("역할·담당자와 무관하게, 이 환경에서 벌어지는 모든 요청·상태변경·코멘트·첨부 활동을 한 주소로 받습니다. (데모/QA용 전역 설정)")
+            with st.form("broadcast_email_settings"):
+                broadcast_email = st.text_input(
+                    "구독할 이메일 주소", value=get_broadcast_email(), placeholder="name@example.com",
+                )
+                if st.form_submit_button("구독 저장"):
+                    broadcast_email = broadcast_email.strip()
+                    if broadcast_email and ("@" not in broadcast_email or broadcast_email.startswith("@")):
+                        st.error("유효한 이메일 주소를 입력해주세요.")
+                    else:
+                        save_broadcast_email(broadcast_email)
+                        st.success("전체 활동 구독 이메일을 저장했습니다." if broadcast_email else "전체 활동 구독을 해지했습니다.")
 
     if page == "요청하기":
         page_create(role_name)

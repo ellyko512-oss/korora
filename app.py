@@ -400,7 +400,7 @@ def render_badge_row(r):
 
 def page_create(role_name):
     st.subheader("📝 업무 요청하기")
-    st.caption("무슨 일이 있는지 자유롭게 적어주세요. AI가 제목·분류·우선순위를 제안하고, 최종 결정은 직접 하시면 됩니다.")
+    st.caption("필요하신 업무 요청 사항을 적어주세요. AI가 제목·분류·우선순위를 제안하고, 최종 결정은 직접 하시면 됩니다.")
 
     text = st.text_area("요청 내용", placeholder="예) 3층 회의실 모니터가 안 켜져요. 오후 2시에 고객 미팅이 있어서 급합니다.", height=120)
 

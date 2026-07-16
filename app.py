@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Reqly — 사내 업무요청 서비스 PoC
+Korora — 사내 업무요청 서비스 PoC
 - 문제 정의: 요청이 '관리 가능한 객체(티켓)'로 전환되는 순간이 없다는 것
 - 해결: 티켓화 + 상태 머신 + 활동 이력 자동 축적 + AI 접수 에이전트
 - 의도적 제외: 로그인(역할 토글로 대체), 알림, 파일 첨부, 검색, 통계 고도화
@@ -42,18 +42,18 @@ HANDLERS = ["김지원", "박민수", "이서연"]
 
 # 데모용 이메일 매핑 (실제 인증 시스템이 없으므로 이름 → 이메일 고정 매핑으로 대체)
 EMAILS = {
-    "김지원": "kim.jiwon@reqly-demo.com",
-    "박민수": "park.minsu@reqly-demo.com",
-    "이서연": "lee.seoyeon@reqly-demo.com",
-    "정하늘": "jung.haneul@reqly-demo.com",
-    "최수진": "choi.sujin@reqly-demo.com",
-    "이준호": "lee.junho@reqly-demo.com",
-    "김다은": "kim.daeun@reqly-demo.com",
-    "박서준": "park.seojun@reqly-demo.com",
-    "홍길동": "hong.gildong@reqly-demo.com",
+    "김지원": "kim.jiwon@Korora-demo.com",
+    "박민수": "park.minsu@Korora-demo.com",
+    "이서연": "lee.seoyeon@Korora-demo.com",
+    "정하늘": "jung.haneul@Korora-demo.com",
+    "최수진": "choi.sujin@Korora-demo.com",
+    "이준호": "lee.junho@Korora-demo.com",
+    "김다은": "kim.daeun@Korora-demo.com",
+    "박서준": "park.seojun@Korora-demo.com",
+    "홍길동": "hong.gildong@Korora-demo.com",
 }
 
-DB_PATH = "reqly.db"
+DB_PATH = "Korora.db"
 ACTIVITY_ICONS = {"CREATED": "🆕", "STATUS": "🔄", "ASSIGN": "👤", "COMMENT": "💬", "ATTACHMENT": "📎"}
 
 
@@ -202,7 +202,7 @@ def change_status(request_id, new_status, actor, reason=""):
     conn.commit()
     conn.close()
     send_email(
-        row["requester"], f"[Reqly] 요청 #{request_id} 상태가 변경되었습니다",
+        row["requester"], f"[Korora] 요청 #{request_id} 상태가 변경되었습니다",
         f"'{row['title']}' 요청이 {STATUS_LABELS[new_status]} 상태로 변경되었습니다.\n{content}",
     )
     return True
@@ -216,7 +216,7 @@ def assign_handler(request_id, handler, actor):
     conn.commit()
     conn.close()
     send_email(
-        handler, f"[Reqly] 새 업무 요청이 배정되었습니다 (#{request_id})",
+        handler, f"[Korora] 새 업무 요청이 배정되었습니다 (#{request_id})",
         f"'{title}' (#{request_id}) 요청의 담당자로 지정되었습니다.",
     )
 
@@ -232,7 +232,7 @@ def add_comment(request_id, actor, text):
     notify_target = row["handler"] if actor == row["requester"] else row["requester"]
     if notify_target:
         send_email(
-            notify_target, f"[Reqly] 요청 #{request_id}에 새 코멘트가 등록되었습니다",
+            notify_target, f"[Korora] 요청 #{request_id}에 새 코멘트가 등록되었습니다",
             f"'{row['title']}' 요청에 {actor}님이 코멘트를 남겼습니다:\n{text}",
         )
 
@@ -322,7 +322,7 @@ def upload_attachment(request_id, uploaded_file, actor) -> bool:
     if not client or not bucket:
         st.warning(f"'{uploaded_file.name}' 첨부 실패: S3가 설정되지 않았습니다. (관리자에게 문의하세요)")
         return False
-    s3_key = f"reqly/{request_id}/{uuid.uuid4().hex}_{uploaded_file.name}"
+    s3_key = f"Korora/{request_id}/{uuid.uuid4().hex}_{uploaded_file.name}"
     try:
         client.upload_fileobj(
             uploaded_file, bucket, s3_key,
@@ -405,7 +405,7 @@ def page_create(role_name):
     text = st.text_area("요청 내용", placeholder="예) 3층 회의실 모니터가 안 켜져요. 오후 2시에 고객 미팅이 있어서 급합니다.", height=120)
 
     col1, col2 = st.columns([1, 3])
-    if col1.button("🤖 AI 분석", type="primary", disabled=not text.strip()):
+    if col1.button("🤖 요청", type="primary", disabled=not text.strip()):
         with st.spinner("AI가 요청을 분석하는 중..."):
             suggestion = ai_intake(text)
         # 재실행 대비: 제안 결과를 session_state에 보존
@@ -646,11 +646,11 @@ def page_dashboard():
 # ──────────────────────────────────────────────
 
 def main():
-    st.set_page_config(page_title="Reqly — 사내 업무요청", page_icon="📮", layout="wide")
+    st.set_page_config(page_title="Korora — 사내 업무요청", page_icon="📮", layout="wide")
     init_db()
 
     with st.sidebar:
-        st.title("📮 Reqly")
+        st.title("📮 Korora")
         st.caption("모든 요청을, 잃어버리지 않게.")
         # 로그인 대신 역할 전환 토글 — PoC 검증 대상이 인증이 아니기 때문
         role = st.radio("역할 전환 (로그인 대체)", ["요청자", "처리자"])

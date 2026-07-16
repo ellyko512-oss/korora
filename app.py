@@ -816,7 +816,10 @@ def page_dashboard():
     st.divider()
     st.markdown("**요청 캘린더 (기준일: 오늘)**")
     today = datetime.now().date()
-    df["created_date"] = pd.to_datetime(df["created_at"]).dt.date
+    # created_at은 과거 분 단위 데이터와 현재 초 단위 데이터가 섞여 있을 수 있어
+    # display_timestamp로 먼저 형식을 통일한 뒤 파싱한다 (그렇지 않으면 pandas가
+    # 첫 값 기준으로 포맷을 추론하다 형식이 다른 값에서 예외를 던진다).
+    df["created_date"] = pd.to_datetime(df["created_at"].apply(display_timestamp)).dt.date
     month_requests = df[(df["created_date"].apply(lambda d: d.year) == today.year) &
                         (df["created_date"].apply(lambda d: d.month) == today.month)]
     st.caption(f"{today.year}년 {today.month}월 · 오늘 {today.strftime('%Y-%m-%d')}")
@@ -852,7 +855,10 @@ def page_dashboard():
         if done.empty:
             st.caption("완료된 요청이 없습니다.")
         else:
-            done["hours"] = (pd.to_datetime(done["updated_at"]) - pd.to_datetime(done["created_at"])).dt.total_seconds() / 3600
+            done["hours"] = (
+                pd.to_datetime(done["updated_at"].apply(display_timestamp))
+                - pd.to_datetime(done["created_at"].apply(display_timestamp))
+            ).dt.total_seconds() / 3600
             summary = done.groupby("handler").agg(완료건수=("id", "count"), 평균처리시간_시간=("hours", "mean")).round(1)
             summary.index = [display_person(name) for name in summary.index]
             st.dataframe(summary, use_container_width=True)

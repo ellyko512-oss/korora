@@ -353,11 +353,11 @@ def add_comment(request_id, actor, text):
 def ai_intake(text: str):
     """자유 텍스트 → {title, category, priority, reason} 구조화. 실패 시 None."""
     try:
-        import anthropic
-        api_key = st.secrets.get("ANTHROPIC_API_KEY")
+        from openai import OpenAI
+        api_key = st.secrets.get("GROQ_API_KEY")
         if not api_key:
             return None
-        client = anthropic.Anthropic(api_key=api_key)
+        client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
         prompt = f"""다음 사내 업무 요청 텍스트를 분석해서 JSON으로만 응답해.
 다른 설명, 마크다운 백틱 없이 JSON 객체 하나만 출력해.
 
@@ -367,12 +367,12 @@ JSON 형식:
 {{"title": "20자 이내 요약 제목", "category": "IT|비품|시설 중 하나", "priority": "높음|보통|낮음 중 하나", "reason": "분류 근거 한 문장"}}
 
 우선순위 기준: 업무 중단/다수 영향/시간 제약 → 높음, 불편하지만 대안 존재 → 보통, 소모품·여유 있는 요청 → 낮음"""
-        resp = client.messages.create(
-            model="claude-sonnet-4-6",
+        resp = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = resp.content[0].text.strip().replace("```json", "").replace("```", "").strip()
+        raw = resp.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
         data = json.loads(raw)
         # 응답 검증: 허용된 값이 아니면 폴백
         if data.get("category") not in CATEGORIES or data.get("priority") not in PRIORITIES:
